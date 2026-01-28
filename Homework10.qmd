@@ -1,0 +1,393 @@
+---
+title: "ECON426: Difference-in-Differences Analysis"
+format:
+  docx:
+    toc: false
+    number-sections: false
+---
+
+::: {.callout-note}
+## Assignment Overview: Steps to Complete
+
+1. Load necessary R packages and data.
+2. Understand the difference-in-differences (DID) research design.
+3. Visualize treatment and control group trends.
+4. Estimate the DID effect using regression.
+5. Assess the parallel trends assumption.
+6. Add control variables to improve precision.
+7. Implement two-way fixed effects for panel data.
+8. Interpret results and discuss policy implications.
+9. Submit your R code, outputs, plots, and written answers.
+:::
+
+# Case Study: The Effect of Minimum Wage on Employment
+
+This assignment replicates and extends the famous Card and Krueger (1994) study on the effect of New Jersey's minimum wage increase on fast-food restaurant employment. This study is a classic application of the difference-in-differences methodology.
+
+We will use the `njmin3` dataset, which contains data on fast-food restaurants in New Jersey and Pennsylvania before and after New Jersey raised its minimum wage in April 1992. The data is available in the `data/` folder.
+
+---
+
+# Instructions
+
+Follow each section carefully, complete the code exercises, and answer the interpretation questions.
+
+# 1. Load Required Packages and Data
+
+```{r}
+if (!require("pacman")) install.packages("pacman")
+
+pacman::p_load(
+  tidyverse,
+  fixest,
+  modelsummary,
+  knitr
+)
+
+# Load the minimum wage data from local data folder
+njmin3 <- read.csv("data/njmin3.csv")
+
+# Examine the data structure
+glimpse(njmin3)
+```
+
+**Key Variables:**
+
+- `fte`: Full-time equivalent employment
+- `nj`: 1 if New Jersey (treatment), 0 if Pennsylvania (control)
+- `d`: 1 if after minimum wage increase (April 1992), 0 if before
+- `bk`, `kfc`, `roys`, `wendys`: Restaurant chain indicators
+- `co_owned`: 1 if company-owned, 0 if franchised
+
+**Question 1:** Why is Pennsylvania used as the control group in this study? What characteristics make it a suitable comparison?
+
+# 2. Understanding the DID Design
+
+**Objective:**
+Understand the logic of difference-in-differences estimation.
+
+## 2.1 The Research Question
+
+On April 1, 1992, New Jersey raised its minimum wage from $4.25 to $5.05 per hour. Pennsylvania's minimum wage remained at $4.25.
+
+**Key Question:** Did the minimum wage increase reduce employment in New Jersey fast-food restaurants?
+
+## 2.2 The DID Setup
+
+|              | Before (Feb 1992) | After (Nov 1992) | Difference |
+|--------------|:-----------------:|:----------------:|:----------:|
+| **NJ (Treatment)**  | $\bar{Y}_{NJ,Before}$ | $\bar{Y}_{NJ,After}$ | $\Delta_{NJ}$ |
+| **PA (Control)**    | $\bar{Y}_{PA,Before}$ | $\bar{Y}_{PA,After}$ | $\Delta_{PA}$ |
+| **Difference**      |                   |                  | **DID** = $\Delta_{NJ} - \Delta_{PA}$ |
+
+## 2.3 Calculate Group Means
+
+```{r}
+# Calculate means by group and time
+means_table <- njmin3 %>%
+  group_by(nj, d) %>%
+  summarise(
+    mean_fte = mean(fte, na.rm = TRUE),
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    State = ifelse(nj == 1, "New Jersey", "Pennsylvania"),
+    Period = ifelse(d == 1, "After", "Before")
+  )
+
+means_table %>%
+  select(State, Period, mean_fte, n) %>%
+  kable(digits = 2, caption = "Mean FTE Employment by State and Period")
+```
+
+## 2.4 Calculate DID Manually
+
+```{r}
+# Extract means
+nj_before <- means_table %>% filter(nj == 1, d == 0) %>% pull(mean_fte)
+nj_after <- means_table %>% filter(nj == 1, d == 1) %>% pull(mean_fte)
+pa_before <- means_table %>% filter(nj == 0, d == 0) %>% pull(mean_fte)
+pa_after <- means_table %>% filter(nj == 0, d == 1) %>% pull(mean_fte)
+
+# Calculate differences
+diff_nj <- nj_after - nj_before
+diff_pa <- pa_after - pa_before
+did_estimate <- diff_nj - diff_pa
+
+cat("New Jersey change:", round(diff_nj, 2), "\n")
+cat("Pennsylvania change:", round(diff_pa, 2), "\n")
+cat("DID estimate:", round(did_estimate, 2), "\n")
+```
+
+**Question 2:** Interpret the DID estimate. What does it tell us about the effect of the minimum wage increase on employment?
+
+# 3. Visualizing the DID
+
+**Objective:**
+Create visualizations that illustrate the difference-in-differences.
+
+## 3.1 Group Means Plot
+
+```{r}
+# Prepare data for plotting
+plot_data <- means_table %>%
+  mutate(time = ifelse(d == 0, 0, 1))
+
+ggplot(plot_data, aes(x = time, y = mean_fte, color = State, group = State)) +
+  geom_point(size = 4) +
+  geom_line(linewidth = 1) +
+  geom_vline(xintercept = 0.5, linetype = "dashed", color = "gray50") +
+  scale_x_continuous(breaks = c(0, 1), labels = c("Before\n(Feb 1992)", "After\n(Nov 1992)")) +
+  scale_color_manual(values = c("New Jersey" = "blue", "Pennsylvania" = "red")) +
+  labs(x = "", y = "Mean FTE Employment",
+       title = "Difference-in-Differences: Minimum Wage Effect",
+       subtitle = "New Jersey vs Pennsylvania Fast Food Employment") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+## 3.2 Add Counterfactual Line
+
+```{r}
+# Create counterfactual (what NJ would have been without treatment)
+counterfactual <- nj_before + diff_pa
+
+ggplot(plot_data, aes(x = time, y = mean_fte, color = State, group = State)) +
+  geom_point(size = 4) +
+  geom_line(linewidth = 1) +
+  # Add counterfactual
+  geom_segment(aes(x = 0, xend = 1, y = nj_before, yend = counterfactual),
+               linetype = "dashed", color = "blue", alpha = 0.5) +
+  geom_point(aes(x = 1, y = counterfactual), color = "blue", shape = 1, size = 4) +
+  # Annotation
+  annotate("segment", x = 1.05, xend = 1.05, y = counterfactual, yend = nj_after,
+           arrow = arrow(ends = "both", length = unit(0.1, "inches")), color = "darkgreen") +
+  annotate("text", x = 1.15, y = (counterfactual + nj_after)/2, label = "DID",
+           color = "darkgreen", fontface = "bold") +
+  geom_vline(xintercept = 0.5, linetype = "dashed", color = "gray50") +
+  scale_x_continuous(breaks = c(0, 1), labels = c("Before", "After"), limits = c(-0.1, 1.3)) +
+  scale_color_manual(values = c("New Jersey" = "blue", "Pennsylvania" = "red")) +
+  labs(x = "", y = "Mean FTE Employment",
+       title = "DID with Counterfactual",
+       caption = "Dashed blue line shows counterfactual trend for NJ") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+**Question 3:** Explain what the counterfactual line represents. Why is it necessary for causal interpretation?
+
+# 4. DID Regression Estimation
+
+**Objective:**
+Estimate the DID effect using regression.
+
+## 4.1 The DID Regression Model
+
+The DID estimator can be obtained from the following regression:
+
+$$Y_{it} = \beta_0 + \beta_1 NJ_i + \beta_2 POST_t + \delta (NJ_i \times POST_t) + \epsilon_{it}$$
+
+Where:
+- $\beta_0$ = baseline (PA, Before)
+- $\beta_1$ = NJ vs PA difference at baseline
+- $\beta_2$ = Before vs After change for PA
+- $\delta$ = **DID estimate** (causal effect of minimum wage)
+
+```{r}
+# DID regression
+did_model <- lm(fte ~ nj * d, data = njmin3)
+summary(did_model)
+```
+
+## 4.2 Interpret the Coefficients
+
+```{r}
+# Extract coefficients
+coefs <- coef(did_model)
+
+cat("Interpretation of coefficients:\n")
+cat("Intercept (PA, Before):", round(coefs[1], 2), "\n")
+cat("NJ effect at baseline:", round(coefs["nj"], 2), "\n")
+cat("Time effect for PA:", round(coefs["d"], 2), "\n")
+cat("DID (Treatment effect):", round(coefs["nj:d"], 2), "\n")
+```
+
+**Question 4:**
+a) What is the coefficient on `nj:d`? This is your DID estimate.
+b) Is the effect statistically significant?
+c) Does the minimum wage increase appear to have reduced employment?
+
+# 5. The Parallel Trends Assumption
+
+**Objective:**
+Understand and assess the key identifying assumption.
+
+## 5.1 The Assumption
+
+For DID to identify a causal effect, we need the **parallel trends assumption**:
+
+> In the absence of treatment, the treatment and control groups would have followed parallel trends over time.
+
+This means: $E[Y_{NJ,1}(0) - Y_{NJ,0}] = E[Y_{PA,1} - Y_{PA,0}]$
+
+## 5.2 Why Can't We Test This Directly?
+
+The assumption involves the counterfactual $Y_{NJ,1}(0)$ - what NJ employment would have been without the minimum wage increase. This is fundamentally unobservable.
+
+## 5.3 What We Can Check
+
+If we had multiple pre-treatment periods, we could check whether trends were parallel before treatment. With only two periods, we rely on:
+
+1. Economic reasoning
+2. Similarity of pre-treatment levels
+3. Placebo tests
+
+**Question 5:**
+a) Why is the parallel trends assumption necessary for causal inference with DID?
+b) What would happen to our estimate if NJ was already on a different employment trend before the policy?
+c) Propose a scenario that would violate the parallel trends assumption in this context.
+
+# 6. Adding Control Variables
+
+**Objective:**
+Improve precision by controlling for observable differences.
+
+## 6.1 DID with Covariates
+
+```{r}
+# DID with restaurant chain controls
+did_controls <- lm(fte ~ nj * d + bk + kfc + roys + co_owned, data = njmin3)
+summary(did_controls)
+```
+
+## 6.2 Compare Models
+
+```{r}
+modelsummary(
+  list("Basic DID" = did_model, "DID with Controls" = did_controls),
+  stars = TRUE,
+  gof_omit = "IC|Log|RMSE|F",
+  title = "DID Estimates with and without Controls"
+)
+```
+
+**Question 6:** How does adding control variables affect:
+a) The DID estimate?
+b) The standard error of the DID estimate?
+c) The R-squared?
+
+# 7. Two-Way Fixed Effects (Extension)
+
+**Objective:**
+Understand the connection between DID and two-way fixed effects.
+
+## 7.1 Creating Panel Structure
+
+For this analysis, we'll reshape the data to demonstrate the panel approach:
+
+```{r}
+# The njmin3 data is already in "long" format for this demonstration
+# With state and time indicators, we can use two-way fixed effects
+
+# Using fixest for fast fixed effects estimation
+twfe_model <- feols(fte ~ nj:d | nj + d, data = njmin3)
+summary(twfe_model)
+```
+
+**Explanation:**
+- `| nj + d` adds state (nj) and time (d) fixed effects
+- The coefficient on `nj:d` is identical to our DID estimate
+
+**Question 7:** Explain why two-way fixed effects (unit + time FE) produces the same estimate as the DID regression with interaction terms.
+
+# 8. Robustness Checks
+
+**Objective:**
+Assess the robustness of the findings.
+
+## 8.1 Subsample Analysis
+
+```{r}
+# Estimate separately by chain
+chains <- c("bk", "kfc", "roys", "wendys")
+chain_results <- list()
+
+for(chain in chains) {
+  chain_data <- njmin3 %>% filter(get(chain) == 1)
+  if(nrow(chain_data) > 10) {
+    model <- lm(fte ~ nj * d, data = chain_data)
+    chain_results[[chain]] <- model
+  }
+}
+
+# Display results
+modelsummary(
+  chain_results,
+  stars = TRUE,
+  coef_map = c("nj:d" = "DID Estimate"),
+  gof_omit = "IC|Log|RMSE|F|Adj",
+  title = "DID Estimates by Restaurant Chain"
+)
+```
+
+## 8.2 Placebo Test Idea
+
+If we had data from an earlier period (say 1990-1991), we could run a "placebo" DID where no treatment occurred:
+
+```{r}
+#| eval: false
+# Conceptual code for placebo test (requires additional data)
+# placebo_did <- lm(fte ~ nj * placebo_post, data = pre_treatment_data)
+# If significant, suggests pre-existing differential trends
+```
+
+**Question 8:** Why are placebo tests useful for validating the DID design? What would a significant placebo result indicate?
+
+# 9. Economic Interpretation
+
+## 9.1 Summary of Findings
+
+```{r}
+# Final model summary
+summary(did_controls)
+```
+
+**Question 9:** Based on your analysis:
+
+a) What is your best estimate of the effect of the minimum wage increase on FTE employment?
+
+b) The result that minimum wage increases do not reduce employment was controversial. What are some possible explanations for this finding?
+
+c) What are the limitations of using only two states and two time periods?
+
+# Summary Questions
+
+Answer the following questions in complete sentences:
+
+1. **Research Design**: Explain the difference-in-differences research design in your own words. What makes it useful for causal inference?
+
+2. **Parallel Trends**: Why is the parallel trends assumption crucial? What happens to the DID estimate if this assumption is violated?
+
+3. **Interpretation**: Card and Krueger found that employment *increased* slightly in NJ relative to PA. Propose two economic explanations for why a minimum wage increase might not reduce employment.
+
+4. **External Validity**: Can we generalize these findings to other states, time periods, or industries? What factors might limit generalizability?
+
+5. **Policy Implications**: A state legislator asks you whether your analysis supports raising the minimum wage. How would you respond, being careful to acknowledge both what the analysis shows and its limitations?
+
+# Final Deliverables
+
+Submit:
+
+- Fully annotated R code
+- DID calculations (both manual and regression)
+- Visualizations showing the DID graphically
+- Regression output tables
+- Written interpretation answers
+
+# Helpful Reminders
+
+- DID requires the parallel trends assumption - always think about whether it's plausible
+- The treatment effect is captured by the interaction term
+- Adding controls can improve precision but doesn't change the fundamental identification
+- Be cautious about generalizing from a single policy change
